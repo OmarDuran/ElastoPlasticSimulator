@@ -22,10 +22,12 @@
 // Analysis utilities
 #include "pzanalysis.h"
 #include "pzstepsolver.h"
+#include "pzpostprocanalysis.h"
 
 // Structure matrix utilities
 #include "TPZSSpStructMatrix.h"
 #include "pzskylstrmatrix.h"
+#include "pzfstrmatrix.h"
 
 
 
@@ -40,13 +42,16 @@ void PrintGeometry(TPZGeoMesh * gmesh);
 TPZCompMesh * CMeshFooting2D(TPZGeoMesh * gmesh, int p_order);
 
 /// Analysis that solve the Non-Linear System (NLS)
-TPZAnalysis * Analysis(TPZCompMesh * cmesh);
+TPZAnalysis * Analysis(TPZCompMesh * cmesh, int n_threads);
+
+/// Load the solution inside memory once the solution is converged
+void AcceptSolution(TPZCompMesh * cmesh, TPZAnalysis * analysis);
 
 /// Non-linear solver
 bool FindRoot(TPZAnalysis * analysis);
 
 /// Post-process displacement, strain and stress
-void PostProcess(TPZAnalysis *analysis, std::string plotfile);
+void PostProcess(TPZAnalysis *analysis, TPZStack<std::string> & scalnames, std::string plotfile);
 
 /// Apply loading ramp
 void LoadingRamp(REAL pseudo_t, TPZCompMesh * cmesh);
@@ -58,12 +63,37 @@ enum EBC_Type { ETn = 1, Eu_null = 3, Eu = 7};
 
 int main(int argc, char *argv[]){
     
-    int p_order = 1;
+    int p_order = 2;
+    int n_threads = 8;
     TPZGeoMesh * gmesh = ReadGeometry();
     PrintGeometry(gmesh);
     
     TPZCompMesh *cmesh      = CMeshFooting2D(gmesh, p_order);
-    TPZAnalysis *analysis   = Analysis(cmesh);
+    TPZAnalysis *analysis   = Analysis(cmesh,n_threads);
+    
+    /// Creation of a post-process analysis
+    TPZPostProcAnalysis * post_processor = new TPZPostProcAnalysis;
+    post_processor->SetCompMesh(cmesh);
+    
+    int n_regions = 1;
+    TPZManVector<int,10> post_mat_id(n_regions);
+    post_mat_id[0] = ERock;
+    
+    TPZStack<std::string> var_names;
+    var_names.Push("DisplacementMemX");
+    var_names.Push("DisplacementMemY");
+    var_names.Push("XStress");
+    var_names.Push("YStress");
+    var_names.Push("ZStress");
+    var_names.Push("VolTotalStrain");
+    var_names.Push("PlasticSqJ2");
+    var_names.Push("I1Stress");
+    
+    post_processor->SetPostProcessVariables(post_mat_id, var_names);
+    TPZFStructMatrix structmatrix(post_processor->Mesh());
+    structmatrix.SetNumThreads(n_threads);
+    post_processor->SetStructuralMatrix(structmatrix);
+    
     std::string plotfile = "footing.vtk";
     
     // For a single step
@@ -73,7 +103,9 @@ int main(int argc, char *argv[]){
         REAL t = it*dt;
         LoadingRamp(t,cmesh);
         FindRoot(analysis);
-        PostProcess(analysis,plotfile);
+        AcceptSolution(cmesh, analysis);
+        post_processor->TransferSolution();
+        PostProcess(post_processor,var_names,plotfile);
     }
     
     std::cout << "Execution complete." << std::endl;
@@ -117,17 +149,19 @@ TPZCompMesh * CMeshFooting2D(TPZGeoMesh * gmesh, int p_order){
     cmesh->SetDefaultOrder(p_order);
     cmesh->SetDimModel(dim);
     
+    // Mohr Coulomb data
+    REAL mc_cohesion    = 10.0;
+    REAL mc_phi         = (90.0*M_PI/180);
+    REAL mc_psi         = mc_phi;
+    
     /// ElastoPlastic Material using Mohr Coulomb
     // Elastic predictor
     TPZElasticResponse ER;
-    REAL G = 12000.0;
+    REAL G = 400*mc_cohesion;
     REAL nu = 0.3;
     REAL E = 2.0*G*(1+nu);
     
-    // Mohr Coulomb data
-    REAL mc_cohesion    = 25.0*1.0e10;
-    REAL mc_phi         = (90.0*M_PI/180);//(90.0*M_PI/180);//(10.0*M_PI/180);
-    REAL mc_psi         = mc_phi; // because MS do not understand
+
     
     TPZPlasticStepPV<TPZYCMohrCoulombPV, TPZElasticResponse> LEMC;
     ER.SetUp(E, nu);
@@ -135,17 +169,15 @@ TPZCompMesh * CMeshFooting2D(TPZGeoMesh * gmesh, int p_order){
     LEMC.fYC.SetUp(mc_phi, mc_psi, mc_cohesion, ER);
     int PlaneStrain = 1;
     
-    TPZElasticCriterion MatEla;
-    MatEla.SetElasticResponse(ER);
-    
-    TPZMatElastoPlastic2D < TPZElasticCriterion, TPZElastoPlasticMem > * material = new TPZMatElastoPlastic2D < TPZElasticCriterion, TPZElastoPlasticMem >(ERock,PlaneStrain);
-    material->SetPlasticity(MatEla);
-    cmesh->InsertMaterialObject(material);
-    
-//    TPZMatElastoPlastic2D < TPZPlasticStepPV<TPZYCMohrCoulombPV, TPZElasticResponse>, TPZElastoPlasticMem > * material = new TPZMatElastoPlastic2D < TPZPlasticStepPV<TPZYCMohrCoulombPV, TPZElasticResponse>, TPZElastoPlasticMem >(ERock,PlaneStrain);
-//    material->SetPlasticity(LEMC);
-//    material->SetPlasticity(LEMC);
+//    TPZElasticCriterion MatEla;
+//    MatEla.SetElasticResponse(ER);
+//    TPZMatElastoPlastic2D < TPZElasticCriterion, TPZElastoPlasticMem > * material = new TPZMatElastoPlastic2D < TPZElasticCriterion, TPZElastoPlasticMem >(ERock,PlaneStrain);
+//    material->SetPlasticity(MatEla);
 //    cmesh->InsertMaterialObject(material);
+    
+    TPZMatElastoPlastic2D < TPZPlasticStepPV<TPZYCMohrCoulombPV, TPZElasticResponse>, TPZElastoPlasticMem > * material = new TPZMatElastoPlastic2D < TPZPlasticStepPV<TPZYCMohrCoulombPV, TPZElasticResponse>, TPZElastoPlasticMem >(ERock,PlaneStrain);
+    material->SetPlasticity(LEMC);
+    cmesh->InsertMaterialObject(material);
     
     
     TPZFMatrix<STATE> val1(2,2,0.), val2(2,1,0.);
@@ -158,11 +190,13 @@ TPZCompMesh * CMeshFooting2D(TPZGeoMesh * gmesh, int p_order){
     val2(1,0) = 0;
     TPZBndCond * bc_lateral = material->CreateBC(material, ELateralBC, Eu_null, val1, val2);
     
+//    val2(0,0) = 0;
+//    val2(1,0) = 0;
+//    val1(0,0) = 0;
+//    val1(1,1) = 1;
     val2(0,0) = 0;
     val2(1,0) = 0;
-    val1(0,0) = 0;
-    val1(1,1) = 1;
-    TPZBndCond * bc_top = material->CreateBC(material, ETopBC, Eu, val1, val2);
+    TPZBndCond * bc_top = material->CreateBC(material, ETopBC, ETn, val1, val2);
     
     val2(0,0) = 0;
     val2(1,0) = 0;
@@ -184,29 +218,24 @@ TPZCompMesh * CMeshFooting2D(TPZGeoMesh * gmesh, int p_order){
     return cmesh;
 }
 
-TPZAnalysis * Analysis(TPZCompMesh * cmesh){
+TPZAnalysis * Analysis(TPZCompMesh * cmesh, int n_threads){
     
-    int numofThreads = 0;
     TPZAnalysis * analysis = new TPZAnalysis(cmesh,true);
 //    TPZSkylineStructMatrix matrix(cmesh);
     TPZSymetricSpStructMatrix matrix(cmesh);
     TPZStepSolver<STATE> step;
     step.SetDirect(ELDLt);
-    matrix.SetNumThreads(numofThreads);
+    matrix.SetNumThreads(n_threads);
     analysis->SetStructuralMatrix(matrix);
     analysis->SetSolver(step);
     return analysis;
 }
 
-void PostProcess(TPZAnalysis *analysis, std::string plotfile)
+void PostProcess(TPZAnalysis *analysis, TPZStack<std::string> & scalnames, std::string plotfile)
 {
     const int dim = analysis->Mesh()->Dimension();
-    int div = 0;
-    TPZStack<std::string> scalnames, vecnames;
-//    scalnames.Push("SigmaX");
-//    scalnames.Push("SigmaY");
-//    scalnames.Push("SigmaZ");
-    vecnames.Push("Displacement");
+    int div = 1;
+    TPZStack<std::string> vecnames;
     analysis->DefineGraphMesh(dim, scalnames, vecnames, plotfile);
     analysis->PostProcess(div);
 }
@@ -245,11 +274,12 @@ void LoadingRamp(REAL pseudo_t, TPZCompMesh * cmesh){
     }
     
     /// Apply loading
-    REAL max_uy = 5.0;
+    REAL max_uy = 10.0;
     REAL min_uy = 0.0;
     
     /// Compute current displacement
-    REAL uy = footing_lenght*(max_uy - min_uy)*pseudo_t/100.0;
+//    REAL uy = (footing_lenght*(max_uy - min_uy)*pseudo_t)/100.0;
+    REAL uy = (footing_lenght*(max_uy - min_uy)*pseudo_t);
     
     /// Apply current displacement
     TPZFMatrix<STATE> val2(2,1,0.);
@@ -268,13 +298,14 @@ void LoadingRamp(REAL pseudo_t, TPZCompMesh * cmesh){
 bool FindRoot(TPZAnalysis *analysis){
     
     TPZFMatrix<STATE> x(analysis->Solution()), dx;
-//    x.Zero();
-    REAL tol = 1.0e2;
-    int n_it = 20;
+    x.Zero();
+    REAL tol = 1.0e-2;
+    int n_it = 50;
     bool stop_criterion_Q = false;
     REAL norm_res;
+    analysis->Assemble();
     for (int i = 1; i <= n_it; i++) {
-        analysis->Assemble();
+        analysis->Solver().Matrix()->SetIsDecomposed(0);
 //        analysis->Rhs() *= -1.0;
         analysis->Solve();
         dx = analysis->Solution();
@@ -288,10 +319,54 @@ bool FindRoot(TPZAnalysis *analysis){
             std::cout << "Number of iterations = " << i << std::endl;
             break;
         }
+        analysis->Assemble();
     }
     
     if (stop_criterion_Q == false) {
         std::cout << "Nonlinear process not converged with residue norm = " << norm_res << std::endl;
     }
     return stop_criterion_Q;
+}
+
+void AcceptSolution(TPZCompMesh * cmesh, TPZAnalysis * analysis){
+    {
+        TPZMaterial *mat = cmesh->FindMaterial(ERock);
+        if (!mat) {
+            DebugStop();
+        }
+        
+        bool accept_solution_Q = true;
+        {
+            std::map<int, TPZMaterial *> & refMatVec = cmesh->MaterialVec();
+            std::map<int, TPZMaterial * >::iterator mit;
+            TPZMatWithMem<TPZElastoPlasticMem> * pMatWithMem;
+            
+            for(mit=refMatVec.begin(); mit!= refMatVec.end(); mit++)
+            {
+                pMatWithMem = dynamic_cast<TPZMatWithMem<TPZElastoPlasticMem> *>( mit->second );
+                if(pMatWithMem != NULL)
+                {
+                    pMatWithMem->SetUpdateMem(accept_solution_Q);
+                }
+            }
+        }
+        
+        analysis->AssembleResidual();
+        
+        accept_solution_Q = false;
+        {
+            std::map<int, TPZMaterial *> & refMatVec = cmesh->MaterialVec();
+            std::map<int, TPZMaterial * >::iterator mit;
+            TPZMatWithMem<TPZElastoPlasticMem> * pMatWithMem;
+            
+            for(mit=refMatVec.begin(); mit!= refMatVec.end(); mit++)
+            {
+                pMatWithMem = dynamic_cast<TPZMatWithMem<TPZElastoPlasticMem> *>( mit->second );
+                if(pMatWithMem != NULL)
+                {
+                    pMatWithMem->SetUpdateMem(accept_solution_Q);
+                }
+            }
+        }
+    }
 }
