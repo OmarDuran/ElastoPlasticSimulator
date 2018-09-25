@@ -151,7 +151,7 @@ TPZCompMesh * CMeshFooting2D(TPZGeoMesh * gmesh, int p_order){
     
     // Mohr Coulomb data
     REAL mc_cohesion    = 10.0;
-    REAL mc_phi         = (90.0*M_PI/180);
+    REAL mc_phi         = (20.0*M_PI/180);
     REAL mc_psi         = mc_phi;
     
     /// ElastoPlastic Material using Mohr Coulomb
@@ -169,15 +169,15 @@ TPZCompMesh * CMeshFooting2D(TPZGeoMesh * gmesh, int p_order){
     LEMC.fYC.SetUp(mc_phi, mc_psi, mc_cohesion, ER);
     int PlaneStrain = 1;
     
-//    TPZElasticCriterion MatEla;
-//    MatEla.SetElasticResponse(ER);
-//    TPZMatElastoPlastic2D < TPZElasticCriterion, TPZElastoPlasticMem > * material = new TPZMatElastoPlastic2D < TPZElasticCriterion, TPZElastoPlasticMem >(ERock,PlaneStrain);
-//    material->SetPlasticity(MatEla);
-//    cmesh->InsertMaterialObject(material);
-    
-    TPZMatElastoPlastic2D < TPZPlasticStepPV<TPZYCMohrCoulombPV, TPZElasticResponse>, TPZElastoPlasticMem > * material = new TPZMatElastoPlastic2D < TPZPlasticStepPV<TPZYCMohrCoulombPV, TPZElasticResponse>, TPZElastoPlasticMem >(ERock,PlaneStrain);
-    material->SetPlasticity(LEMC);
+    TPZElasticCriterion MatEla;
+    MatEla.SetElasticResponse(ER);
+    TPZMatElastoPlastic2D < TPZElasticCriterion, TPZElastoPlasticMem > * material = new TPZMatElastoPlastic2D < TPZElasticCriterion, TPZElastoPlasticMem >(ERock,PlaneStrain);
+    material->SetPlasticity(MatEla);
     cmesh->InsertMaterialObject(material);
+    
+//    TPZMatElastoPlastic2D < TPZPlasticStepPV<TPZYCMohrCoulombPV, TPZElasticResponse>, TPZElastoPlasticMem > * material = new TPZMatElastoPlastic2D < TPZPlasticStepPV<TPZYCMohrCoulombPV, TPZElasticResponse>, TPZElastoPlasticMem >(ERock,PlaneStrain);
+//    material->SetPlasticity(LEMC);
+//    cmesh->InsertMaterialObject(material);
     
     
     TPZFMatrix<STATE> val1(2,2,0.), val2(2,1,0.);
@@ -274,7 +274,7 @@ void LoadingRamp(REAL pseudo_t, TPZCompMesh * cmesh){
     }
     
     /// Apply loading
-    REAL max_uy = 10.0;
+    REAL max_uy = 100.0;
     REAL min_uy = 0.0;
     
     /// Compute current displacement
@@ -299,13 +299,13 @@ bool FindRoot(TPZAnalysis *analysis){
     
     TPZFMatrix<STATE> x(analysis->Solution()), dx;
     x.Zero();
-    REAL tol = 1.0e-2;
+    REAL tol = 1.0e-4;
     int n_it = 50;
     bool stop_criterion_Q = false;
     REAL norm_res;
     analysis->Assemble();
     for (int i = 1; i <= n_it; i++) {
-        analysis->Solver().Matrix()->SetIsDecomposed(0);
+//        analysis->Solver().Matrix()->SetIsDecomposed(0);
 //        analysis->Rhs() *= -1.0;
         analysis->Solve();
         dx = analysis->Solution();
